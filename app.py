@@ -3,13 +3,12 @@ from rembg import remove
 from PIL import Image, ImageOps
 import io
 import numpy as np
-import cv2 # Cần cho chức năng căn giữa tự động
-from streamlit_cropper import st_cropper # Thư viện cắt ảnh tương tác
+import cv2
+import zipfile
 
 # --- CẤU HÌNH ---
-st.set_page_config(page_title="Pro Passport Photo Maker", layout="wide")
+st.set_page_config(page_title="Auto Passport Photo Maker", layout="wide")
 
-# Kích thước chuẩn (300 DPI)
 SIZE_CHART = {
     "2x3 cm": (236, 354),
     "3x4 cm": (354, 472),
@@ -17,157 +16,147 @@ SIZE_CHART = {
     "Hộ chiếu (3.5x4.5 cm)": (413, 531)
 }
 
-# Màu nền chuẩn
 BG_COLORS = {
     "Nền Trắng": (255, 255, 255),
-    "Nền Xanh Dương (Chuẩn)": (0, 51, 153), # Màu xanh chuẩn ảnh thẻ
+    "Nền Xanh Dương (Chuẩn)": (0, 51, 153),
     "Nền Xanh Dương (Sáng)": (0, 112, 192)
 }
 
-# --- HÀM HỖ TRỢ ---
-def get_face_center(pil_image):
-    """Sử dụng OpenCV để tìm tâm khuôn mặt"""
-    # Chuyển PIL sang OpenCV (BGR)
+# --- THUẬT TOÁN TỰ ĐỘNG CẮT CHUẨN ẢNH THẺ ---
+def auto_crop_id_photo(pil_image, target_size):
+    """
+    Tự động nhận diện khuôn mặt và cắt theo tỉ lệ chuẩn ảnh thẻ
+    """
+    # Chuyển đổi sang định dạng OpenCV
     open_cv_image = np.array(pil_image)
-    open_cv_image = open_cv_image[:, :, ::-1].copy()
+    if len(open_cv_image.shape) == 3 and open_cv_image.shape[2] == 3: # RGB
+        open_cv_image = open_cv_image[:, :, ::-1].copy() # Sang BGR
+    elif len(open_cv_image.shape) == 3 and open_cv_image.shape[2] == 4: # RGBA
+        open_cv_image = cv2.cvtColor(open_cv_image, cv2.COLOR_RGBA2BGR)
+        
     gray = cv2.cvtColor(open_cv_image, cv2.COLOR_BGR2GRAY)
     
-    # Tải bộ phân loại khuôn mặt mặc định
+    # Nhận diện khuôn mặt
     face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-    faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(50, 50))
     
     if len(faces) == 0:
-        return None # Không tìm thấy khuôn mặt
-    
-    # Lấy khuôn mặt đầu tiên (lớn nhất)
-    (x, y, w, h) = faces[0]
-    # Trả về tâm khuôn mặt (x_center, y_center)
-    return (x + w//2, y + h//2)
-
-def autocenter_image(pil_image, target_ratio):
-    """Cắt ảnh sao cho tâm khuôn mặt nằm giữa khung hình theo tỉ lệ chuẩn"""
-    face_center = get_face_center(pil_image)
-    
-    if face_center is None:
-        st.warning("⚠️ Không nhận diện được khuôn mặt để tự động căn giữa. Sử dụng vùng cắt thủ công.")
-        return pil_image
-
-    img_w, img_h = pil_image.size
-    face_x, face_y = face_center
-    target_w_ratio, target_h_ratio = target_ratio
-    
-    # Tính toán kích thước vùng cắt dựa trên tỉ lệ đích
-    # Chúng ta muốn lấy vùng lớn nhất có thể xung quanh khuôn mặt
-    curr_ratio = img_w / img_h
-    target_ratio_val = target_w_ratio / target_h_ratio
-
-    if curr_ratio > target_ratio_val:
-        # Ảnh quá rộng, cắt theo chiều cao
-        new_h = img_h
-        new_w = int(new_h * target_ratio_val)
-    else:
-        # Ảnh quá cao, cắt theo chiều rộng
-        new_w = img_w
-        new_h = int(new_w / target_ratio_val)
+        return pil_image # Trả về ảnh gốc nếu không thấy mặt
         
-    # Tính toán tọa độ cắt (left, top, right, bottom) sao cho face_center nằm giữa
-    left = face_x - new_w // 2
-    top = face_y - new_h // 2
-    right = face_x + new_w // 2
-    bottom = face_y + new_h // 2
+    # Lấy khuôn mặt lớn nhất (đề phòng có người phía sau)
+    faces = sorted(faces, key=lambda x: x[2]*x[3], reverse=True)
+    x, y, w, h = faces[0]
     
-    # Xử lý trường hợp vùng cắt vượt ra ngoài biên ảnh gốc
-    if left < 0:
-        right -= left
-        left = 0
-    if top < 0:
-        bottom -= top
-        top = 0
-    if right > img_w:
-        left -= (right - img_w)
-        right = img_w
-    if bottom > img_h:
-        top -= (bottom - img_h)
-        bottom = img_h
-        
-    return pil_image.crop((left, top, right, bottom))
+    # Tính toán kích thước cắt theo tỉ lệ vàng
+    target_w, target_h = target_size
+    aspect_ratio = target_w / target_h
+    
+    # Chiều cao khuôn mặt chiếm khoảng 60% chiều cao ảnh chuẩn
+    new_h = int(h / 0.6)
+    new_w = int(new_h * aspect_ratio)
+    
+    # Tọa độ tâm khuôn mặt
+    cx = x + w // 2
+    
+    # Tọa độ khung cắt
+    left = cx - new_w // 2
+    right = left + new_w
+    # Chừa một khoảng trống trên đầu (khoảng 10% chiều cao ảnh)
+    top = int(y - h * 0.1 - new_h * 0.1)
+    bottom = top + new_h
+    
+    # Xử lý trường hợp khung cắt vượt ra ngoài ảnh (Thêm viền bù đắp - padding)
+    img_h, img_w = open_cv_image.shape[:2]
+    pad_left = max(0, -left)
+    pad_top = max(0, -top)
+    pad_right = max(0, right - img_w)
+    pad_bottom = max(0, bottom - img_h)
+    
+    # Tạo ảnh có viền nội suy để bù vào phần thiếu hụt
+    padded_img = cv2.copyMakeBorder(open_cv_image, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_REPLICATE)
+    
+    # Cập nhật lại tọa độ cắt trên ảnh đã bù viền
+    new_left = left + pad_left
+    new_top = top + pad_top
+    new_right = right + pad_left
+    new_bottom = bottom + pad_top
+    
+    cropped_cv = padded_img[new_top:new_bottom, new_left:new_right]
+    
+    # Chuyển ngược về PIL
+    cropped_rgb = cv2.cvtColor(cropped_cv, cv2.COLOR_BGR2RGB)
+    return Image.fromarray(cropped_rgb)
 
 # --- GIAO DIỆN CHÍNH ---
-st.title("📸 Máy Tạo Ảnh Thẻ Chuyên Nghiệp Pro")
-st.markdown("Cắt ảnh, tự động căn giữa, tách nền và chọn phông nền chuẩn.")
+st.title("📸 Máy Tạo Ảnh Thẻ AI Tự Động Hàng Loạt")
+st.markdown("Tải lên nhiều ảnh cùng lúc. AI sẽ tự động tìm khuôn mặt, cắt theo tỉ lệ vàng, thay nền và nén thành file ZIP cho bạn.")
 
-# 1. Sidebar - Cài đặt
-st.sidebar.header("1. Cài đặt ảnh")
-size_label = st.sidebar.selectbox("Kích thước ảnh thẻ:", list(SIZE_CHART.keys()))
-bg_label = st.sidebar.selectbox("Màu nền ảnh thẻ:", list(BG_COLORS.keys()))
+# Cài đặt Sidebar
+st.sidebar.header("Cài đặt chung")
+size_label = st.sidebar.selectbox("Kích thước:", list(SIZE_CHART.keys()))
+bg_label = st.sidebar.selectbox("Phông nền:", list(BG_COLORS.keys()))
 target_size = SIZE_CHART[size_label]
 target_bg_color = BG_COLORS[bg_label]
 
-st.sidebar.markdown("---")
-st.sidebar.header("2. Tùy chọn nâng cao")
-do_autocenter = st.sidebar.checkbox("Tự động căn giữa khuôn mặt", value=True, help="Nếu bật, AI sẽ cố gắng đưa khuôn mặt bạn vào giữa. Nếu tắt, sẽ dùng chính xác vùng bạn cắt thủ công.")
+# Upload nhiều ảnh
+uploaded_files = st.file_uploader("Tải lên một hoặc nhiều ảnh...", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
-# 2. Vùng Upload và Cắt ảnh (Main Body)
-uploaded_file = st.file_uploader("Tải ảnh chân dung của bạn lên...", type=["jpg", "jpeg", "png"])
-
-if uploaded_file:
-    col1, col2 = st.columns(2)
-    
-    input_image = Image.open(uploaded_file)
-    input_image = ImageOps.exif_transpose(input_image) # Sửa lỗi ảnh bị ngược trên điện thoại
-
-    with col1:
-        st.subheader("Bước 1: Cắt ảnh thủ công (để chọn vùng đẹp)")
-        st.caption("Hãy kéo khung màu đỏ để chọn vùng ảnh bạn muốn lấy.")
+if uploaded_files:
+    if st.button("🚀 Bắt đầu xử lý tất cả"):
+        # Tạo file ZIP trong bộ nhớ ảo
+        zip_buffer = io.BytesIO()
         
-        # Công cụ cắt ảnh tương tác
-        # Khóa tỉ lệ theo kích thước ảnh thẻ đã chọn
-        aspect_ratio = (target_size[0], target_size[1])
-        cropped_img = st_cropper(input_image, realtime_update=True, box_color='#FF0000', aspect_ratio=aspect_ratio)
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            
+            # Tạo lưới hiển thị ảnh (3 ảnh 1 hàng)
+            cols = st.columns(3)
+            
+            progress_bar = st.progress(0)
+            st.write(f"Đang xử lý {len(uploaded_files)} ảnh...")
+            
+            for index, file in enumerate(uploaded_files):
+                col = cols[index % 3] # Phân bổ vào các cột
+                
+                with col:
+                    st.caption(f"Ảnh: {file.name}")
+                    try:
+                        # 1. Đọc và chỉnh hướng ảnh
+                        img = Image.open(file).convert("RGB")
+                        img = ImageOps.exif_transpose(img)
+                        
+                        # 2. Tự động cắt chuẩn ảnh thẻ
+                        cropped_img = auto_crop_id_photo(img, target_size)
+                        
+                        # 3. Tách nền bằng Rembg
+                        no_bg_img = remove(cropped_img)
+                        
+                        # 4. Tạo phông nền và dán ảnh
+                        final_img = Image.new("RGB", no_bg_img.size, target_bg_color)
+                        final_img.paste(no_bg_img, (0, 0), no_bg_img)
+                        
+                        # 5. Resize về đúng Pixel
+                        final_img = final_img.resize(target_size, Image.LANCZOS)
+                        
+                        # Hiển thị
+                        st.image(final_img, use_container_width=True)
+                        
+                        # Lưu vào file ZIP ảo
+                        img_byte_arr = io.BytesIO()
+                        final_img.save(img_byte_arr, format='JPEG', quality=95)
+                        zip_file.writestr(f"anhthe_{size_label}_{file.name}", img_byte_arr.getvalue())
+                        
+                    except Exception as e:
+                        st.error(f"Lỗi: {e}")
+                
+                # Cập nhật thanh tiến trình
+                progress_bar.progress((index + 1) / len(uploaded_files))
+                
+        st.success("🎉 Đã xử lý xong toàn bộ ảnh!")
         
-        # Hiển thị ảnh sau khi cắt thủ công
-        st.image(cropped_img, caption="Vùng đã cắt thủ công", width=200)
-
-    with col2:
-        st.subheader("Bước 2: Xử lý và Kết quả")
-        process_btn = st.button("Tạo ảnh thẻ ngay")
-
-        if process_btn:
-            with st.spinner("Đang xử lý (Tách nền + Căn chỉnh)..."):
-                
-                # --- Xử lý 1: Căn giữa (nếu chọn) ---
-                image_to_process = cropped_img
-                if do_autocenter:
-                    # Gửi ảnh đã cắt thủ công vào để AI căn giữa tinh xảo hơn
-                    image_to_process = autocenter_image(cropped_img, aspect_ratio)
-
-                # --- Xử lý 2: Tách nền ---
-                # Chuyển về RGB để tách nền sạch hơn nếu cần
-                if image_to_process.mode == 'CMYK':
-                    image_to_process = image_to_process.convert('RGB')
-                    
-                no_bg_img = remove(image_to_process)
-                
-                # --- Xử lý 3: Thay nền mới ---
-                # Tạo phông nền màu chuẩn
-                final_img = Image.new("RGB", no_bg_img.size, target_bg_color)
-                # Dán ảnh đã tách nền lên
-                final_img.paste(no_bg_img, (0, 0), no_bg_img)
-                
-                # --- Xử lý 4: Resize về kích thước chuẩn cuối cùng ---
-                final_img = final_img.resize(target_size, Image.LANCZOS)
-
-                # --- Hiển thị kết quả ---
-                st.success("Đã hoàn thành!")
-                st.image(final_img, caption=f"Ảnh thẻ {size_label}", width=target_size[0]//2) # Hiển thị nhỏ lại cho đẹp trên web
-
-                # --- Nút tải về ---
-                buf = io.BytesIO()
-                final_img.save(buf, format="JPEG", quality=95)
-                byte_im = buf.getvalue()
-                st.download_button(
-                    label=f"⬇️ Tải ảnh {size_label} về máy",
-                    data=byte_im,
-                    file_name=f"anh_the_{size_label.replace(' ', '_')}.jpg",
-                    mime="image/jpeg"
-                )
+        # Nút tải xuống file ZIP
+        st.download_button(
+            label="⬇️ TẢI XUỐNG TẤT CẢ (File ZIP)",
+            data=zip_buffer.getvalue(),
+            file_name="anh_the_hang_loat.zip",
+            mime="application/zip"
+        )
