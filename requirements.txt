@@ -1,7 +1,6 @@
 streamlit
 rembg
 pillow
-streamlit-cropper
 opencv-python-headless
 numpy
 onnxruntime
