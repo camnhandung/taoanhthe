@@ -1,44 +1,120 @@
 import streamlit as st
-from PIL import Image
-import rembg
-import io
+import pandas as pd
+import json
 
-st.title("Công cụ tạo ảnh thẻ tự động")
+# Thiết lập cấu hình trang
+st.set_page_config(page_title="Excel to JSON Converter", layout="centered")
 
-# Upload ảnh
-uploaded_file = st.file_uploader("Tải ảnh chân dung lên", type=["jpg", "jpeg", "png"])
-if uploaded_file:
-    image = Image.open(uploaded_file)
-    st.image(image, caption="Ảnh gốc", use_column_width=True)
+st.title("Military Data Converter")
+st.subheader("Chuyển đổi file Excel sang định dạng JSON")
 
-    # Tách nền
-    input_bytes = uploaded_file.read()
-    output_bytes = rembg.remove(input_bytes)
-    output_image = Image.open(io.BytesIO(output_bytes))
+# Bảng ánh xạ tiêu đề (Mapping)
+key_mapping = {
+    "Họ tên khai sinh": "fullname_birth",
+    "Họ tên thường dùng": "fullname_used",
+    "Số hiệu quân nhân": "service_id",
+    "Số thẻ QN/CMND": "id_card_num",
+    "Số thẻ BHYT": "health_ins_num",
+    "Số CCCD": "citizen_id",
+    "Ngày tháng năm sinh": "dob",
+    "Cấp bậc": "rank",
+    "Ngày nhận cấp bậc": "rank_date",
+    "Ngày cấp thẻ QN": "id_card_date",
+    "Chức vụ": "position",
+    "Ngày nhận chức vụ": "position_date",
+    "CNQS": "cnqs",
+    "Bậc kỹ thuật": "tech_level",
+    "Ngày nhập ngũ": "enlist_date",
+    "Ngày xuất ngũ": "discharge_date",
+    "Ngày tái ngũ": "reenlist_date",
+    "Ngày chuyển QNCN": "to_qncn_date",
+    "Ngày chuyển CNV": "to_cnv_date",
+    "Lương nhóm": "salary_group",
+    "Ngạch bậc": "salary_grade",
+    "Ngày vào Đoàn": "youth_union_date",
+    "Ngày vào Đảng": "party_date",
+    "Ngày chính thức": "party_official_date",
+    "TP gia đình": "family_background",
+    "TP bản thân": "personal_background",
+    "Dân tộc": "ethnicity",
+    "Tôn giáo": "religion",
+    "Văn hoá (12/12)": "education",
+    "Ngoại ngữ": "language",
+    "Sức khoẻ": "health",
+    "Hạng thương tật": "disability",
+    "Khen thưởng": "reward",
+    "Kỷ luật": "discipline",
+    "Tên trường": "school_name",
+    "Cấp học": "school_level",
+    "Ngành học": "school_major",
+    "Thời gian học": "school_time",
+    "Nguyên quán": "native_place",
+    "Sinh quán": "birth_place",
+    "Trú quán": "residence",
+    "Báo tin cho ai, ở đâu?": "emergency_contact",
+    "Họ tên cha": "father_name",
+    "Họ tên mẹ": "mother_name",
+    "Họ tên vợ/chồng": "spouse_name",
+    "Tổng số con": "children_count"
+}
 
-    st.image(output_image, caption="Ảnh đã tách nền", use_column_width=True)
+# 1. Widget tải file
+uploaded_file = st.file_uploader("Chọn file Excel (.xlsx hoặc .xls)", type=["xlsx", "xls"])
 
-    # Chọn màu nền
-    bg_color = st.color_picker("Chọn màu nền", "#FFFFFF")
-    bg = Image.new("RGB", output_image.size, bg_color)
-    bg.paste(output_image, (0,0), output_image)
-    st.image(bg, caption="Ảnh thẻ với nền mới", use_column_width=True)
+if uploaded_file is not None:
+    try:
+        # Đọc dữ liệu từ Excel
+        df = pd.read_excel(uploaded_file, engine='openpyxl')
+        df = df.fillna("") # Thay thế ô trống bằng chuỗi rỗng
 
-    # Chọn kích thước
-    size_option = st.selectbox("Chọn kích thước ảnh thẻ", ["2x3 cm", "3x4 cm", "4x6 cm"])
-    dpi = 300  # chuẩn in
-    cm_to_px = lambda cm: int(cm/2.54 * dpi)
-    if size_option == "2x3 cm":
-        size = (cm_to_px(2), cm_to_px(3))
-    elif size_option == "3x4 cm":
-        size = (cm_to_px(3), cm_to_px(4))
-    else:
-        size = (cm_to_px(4), cm_to_px(6))
+        st.success("Tải file thành công! Đang xử lý dữ liệu...")
 
-    final_img = bg.resize(size)
-    st.image(final_img, caption=f"Ảnh thẻ {size_option}", use_column_width=False)
+        json_list = []
+        
+        # Xử lý chuyển đổi
+        for index, row in df.iterrows():
+            entry = {}
+            entry["id"] = index + 1
+            
+            for vn_col, en_key in key_mapping.items():
+                if vn_col in df.columns:
+                    val = row[vn_col]
+                    
+                    # Định dạng lại nếu là ngày tháng (tránh lỗi số nguyên Excel)
+                    if "date" in en_key or en_key == "dob":
+                        if hasattr(val, 'strftime'):
+                            val = val.strftime('%d/%m/%Y')
+                    
+                    # Xử lý số lượng con
+                    if en_key == "children_count":
+                        try:
+                            entry[en_key] = int(val) if val != "" else None
+                        except:
+                            entry[en_key] = None
+                    else:
+                        entry[en_key] = str(val).strip()
+                else:
+                    entry[en_key] = ""
+            
+            json_list.append(entry)
 
-    # Tải xuống
-    buf = io.BytesIO()
-    final_img.save(buf, format="JPEG")
-    st.download_button("Tải ảnh thẻ", buf.getvalue(), file_name="anh_the.jpg", mime="image/jpeg")
+        # 2. Hiển thị xem trước dữ liệu JSON
+        st.write("Xem trước kết quả (5 bản ghi đầu tiên):")
+        st.json(json_list[:5])
+
+        # 3. Chuyển đổi sang chuỗi JSON để tải về
+        final_json = json.dumps(json_list, ensure_ascii=False, indent=4)
+
+        # Nút tải file về
+        st.download_button(
+            label="Tải file JSON về máy",
+            data=final_json,
+            file_name="data_converted.json",
+            mime="application/json"
+        )
+
+    except Exception as e:
+        st.error(f"Đã có lỗi xảy ra: {e}")
+
+else:
+    st.info("Vui lòng tải lên file Excel để bắt đầu.")
